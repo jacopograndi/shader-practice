@@ -1,0 +1,21 @@
+[package]
+name = "shader-practice"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# graphics
+winit = "0.29"
+wgpu = "0.20"
+bytemuck = { version = "1.20.0", features = ["derive"] }
+
+# log and async
+env_logger = "0.11"
+log = "0.4"
+pollster = "0.3"
+
+# math
+glam = { version = "0.29.2", features = ["bytemuck"] }
+
+# texture loading
+image = { version = "0.24", default_features = false, features = ["png"] }
