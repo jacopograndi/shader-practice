@@ -17,23 +17,21 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+mod attachments;
+mod voxels;
+
 mod analytical_sdf_cube;
 mod analytical_sdf_sphere;
-mod attachments;
 mod debug_depth;
 mod debug_empty;
 mod debug_ui;
 mod rasterize_instanced;
 mod rasterize_simple;
+mod raycast_grid_plain;
 mod raycast_sdf;
 
 use attachments::*;
-
-pub struct BindGroupState {
-    pub buffer: Option<wgpu::Buffer>,
-    pub bind_group: wgpu::BindGroup,
-    pub bind_group_layout: wgpu::BindGroupLayout,
-}
+use voxels::*;
 
 pub trait PipelineState {
     fn new(
@@ -52,7 +50,7 @@ pub trait PipelineState {
         clear_depth: bool,
     );
 
-    fn extract(&mut self, _sim_state: &mut SimulationState) {}
+    fn extract(&mut self, _sim_state: &mut SimulationState, queue: &wgpu::Queue) {}
 
     fn get_skip(&self) -> bool;
     fn set_skip(&mut self, skip: bool);
@@ -78,6 +76,12 @@ struct GlobalUniform {
 struct UiUniform {
     pipelines_skip: [[u32; 4]; 256],
     pipelines_num: u32,
+}
+
+pub struct BindGroupState {
+    pub buffer: Vec<wgpu::Buffer>,
+    pub bind_group: wgpu::BindGroup,
+    pub bind_group_layout: wgpu::BindGroupLayout,
 }
 
 struct RenderState<'a> {
@@ -190,7 +194,7 @@ impl<'a> RenderState<'a> {
             label: Some("global_bind_group"),
         });
         let global_bind_group = BindGroupState {
-            buffer: Some(global_uniform_buffer),
+            buffer: vec![global_uniform_buffer],
             bind_group: global_uniform_bind_group,
             bind_group_layout: global_uniform_bind_group_layout,
         };
@@ -228,7 +232,7 @@ impl<'a> RenderState<'a> {
             label: Some("ui_bind_group"),
         });
         let ui_bind_group = BindGroupState {
-            buffer: Some(ui_uniform_buffer),
+            buffer: vec![ui_uniform_buffer],
             bind_group: ui_uniform_bind_group,
             bind_group_layout: ui_uniform_bind_group_layout,
         };
@@ -319,7 +323,7 @@ impl<'a> RenderState<'a> {
             label: Some("diffuse_bind_group"),
         });
         let diffuse_bind_group = BindGroupState {
-            buffer: None,
+            buffer: vec![],
             bind_group: diffuse_bind_group,
             bind_group_layout: texture_bind_group_layout,
         };
@@ -364,8 +368,9 @@ impl<'a> RenderState<'a> {
         // └─┘                                  └─┘ //
         //push_pipeline::<raycast_sdf::Pipeline>(&mut p);
         //push_pipeline::<analytical_sdf_sphere::Pipeline>(&mut p);
-        push_pipeline::<analytical_sdf_cube::Pipeline>(&mut p);
-        push_pipeline::<rasterize_simple::Pipeline>(&mut p);
+        //push_pipeline::<analytical_sdf_cube::Pipeline>(&mut p);
+        //push_pipeline::<rasterize_simple::Pipeline>(&mut p);
+        push_pipeline::<raycast_grid_plain::Pipeline>(&mut p);
         push_pipeline::<rasterize_instanced::Pipeline>(&mut p);
         push_pipeline::<debug_depth::Pipeline>(&mut p);
         push_pipeline::<debug_ui::Pipeline>(&mut p);
@@ -430,7 +435,7 @@ impl<'a> RenderState<'a> {
         let Some(global_buffer) = self
             .bind_groups
             .get("global")
-            .map(|b| b.buffer.as_ref())
+            .map(|b| b.buffer.get(0))
             .flatten()
         else {
             return;
@@ -453,7 +458,7 @@ impl<'a> RenderState<'a> {
         let Some(ui_buffer) = self
             .bind_groups
             .get("ui")
-            .map(|b| b.buffer.as_ref())
+            .map(|b| b.buffer.get(0))
             .flatten()
         else {
             return;
@@ -462,7 +467,7 @@ impl<'a> RenderState<'a> {
             .write_buffer(ui_buffer, 0, bytemuck::cast_slice(&[self.uniform_ui]));
 
         for pipeline in self.pipelines.iter_mut() {
-            pipeline.extract(sim_state);
+            pipeline.extract(sim_state, &self.queue);
         }
     }
 
@@ -498,12 +503,6 @@ impl<'a> RenderState<'a> {
 
         Ok(())
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct SimulationState {
-    pub camera_position: Vec3,
-    pub camera_rotation: Quat,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -588,11 +587,19 @@ impl InputState {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct SimulationState {
+    pub camera_position: Vec3,
+    pub camera_rotation: Quat,
+    pub universe: Universe,
+}
+
 impl SimulationState {
     fn new() -> Self {
         Self {
             camera_position: Vec3::ZERO,
             camera_rotation: Quat::from_rotation_z(PI * 0.5) * Quat::from_rotation_x(PI),
+            universe: simple_universe(),
         }
     }
 

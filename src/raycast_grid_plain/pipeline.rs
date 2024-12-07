@@ -1,92 +1,15 @@
+use glam::IVec3;
+
 use crate::*;
-
-const PIPELINE_NAME: &str = "Rasterize Simple";
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
-}
-impl Vertex {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-            ],
-        }
-    }
-}
-
-const VERTICES: &[Vertex] = &[
-    Vertex {
-        position: [0.0, 0.0, 0.0],
-        color: [0.0, 0.0, 0.0],
-    },
-    Vertex {
-        position: [1.0, 0.0, 0.0],
-        color: [1.0, 0.0, 0.0],
-    },
-    Vertex {
-        position: [1.0, 1.0, 0.0],
-        color: [1.0, 1.0, 0.0],
-    },
-    Vertex {
-        position: [0.0, 1.0, 0.0],
-        color: [0.0, 1.0, 0.0],
-    },
-    Vertex {
-        position: [0.0, 0.0, 1.0],
-        color: [0.0, 0.0, 1.0],
-    },
-    Vertex {
-        position: [1.0, 0.0, 1.0],
-        color: [1.0, 0.0, 1.0],
-    },
-    Vertex {
-        position: [1.0, 1.0, 1.0],
-        color: [1.0, 1.0, 1.0],
-    },
-    Vertex {
-        position: [0.0, 1.0, 1.0],
-        color: [0.0, 1.0, 1.0],
-    },
-];
-
-// with annotated faces
-const INDICES: &[u16] = &[
-    0, 3, 1, // -z
-    3, 2, 1, // -z
-    3, 6, 2, // +y
-    3, 7, 6, // +y
-    1, 2, 6, // +x
-    1, 6, 5, // +x
-    7, 4, 6, // +z
-    6, 4, 5, // +z
-    7, 3, 4, // -x
-    4, 3, 0, // -x
-    5, 0, 1, // -y
-    4, 0, 5, // -y
-];
 
 pub struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     skip: bool,
     //
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
+    voxels_bind_group: BindGroupState,
 }
+
+const PIPELINE_NAME: &str = "Raycast Grid Plain";
 
 impl PipelineState for Pipeline {
     fn get_name(&self) -> String {
@@ -101,21 +24,60 @@ impl PipelineState for Pipeline {
         let Some(global_bind_group) = bind_groups.get("global") else {
             panic!("global bind group missing");
         };
+        let Some(diffuse_bind_group) = bind_groups.get("diffuse") else {
+            panic!("diffuse bind group missing");
+        };
 
-        let shader = device.create_shader_module(wgpu::include_wgsl!("rasterize_simple.wgsl"));
-        let render_pipeline_rasterize_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(&(PIPELINE_NAME.to_string() + " Render Pipeline Layout")),
-                bind_group_layouts: &[&global_bind_group.bind_group_layout],
-                push_constant_ranges: &[],
+        let voxels_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Voxels Buffer"),
+            contents: &vec![0u8; CHUNK_VOLUME * 4],
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let voxels_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("voxels_bind_group_layout"),
             });
+        let voxels_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &voxels_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: voxels_buffer.as_entire_binding(),
+            }],
+            label: Some("voxels_bind_group"),
+        });
+        let voxels_bind_group = BindGroupState {
+            buffer: vec![voxels_buffer],
+            bind_group: voxels_bind_group,
+            bind_group_layout: voxels_bind_group_layout,
+        };
+
+        let shader = device.create_shader_module(wgpu::include_wgsl!("raycast_grid_plain.wgsl"));
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(&(PIPELINE_NAME.to_string() + " Render Pipeline Layout")),
+            bind_group_layouts: &[
+                &global_bind_group.bind_group_layout,
+                &diffuse_bind_group.bind_group_layout,
+                &voxels_bind_group.bind_group_layout,
+            ],
+            push_constant_ranges: &[],
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(&(PIPELINE_NAME.to_string() + " Render Pipeline")),
-            layout: Some(&render_pipeline_rasterize_layout),
+            layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
+                buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -152,26 +114,31 @@ impl PipelineState for Pipeline {
             multiview: None,
         });
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(INDICES),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
         Self {
             pipeline,
             skip: false,
-            vertex_buffer,
-            index_buffer,
+            voxels_bind_group,
         }
     }
 
+    fn extract(&mut self, sim_state: &mut SimulationState, queue: &wgpu::Queue) {
+        // todo: it rewrites everything every frame
+        let Some(chunk_data) = sim_state
+            .universe
+            .chunks
+            .get(&IVec3::ZERO)
+            .map(|c| c.get_ref())
+        else {
+            warn!("no chunk at 0,0,0");
+            return;
+        };
+
+        queue.write_buffer(
+            &self.voxels_bind_group.buffer[0],
+            0,
+            bytemuck::cast_slice(chunk_data.as_ref()),
+        );
+    }
 
     fn render(
         &self,
@@ -187,6 +154,9 @@ impl PipelineState for Pipeline {
             return;
         };
         let Some(global_bind_group) = bind_groups.get("global") else {
+            return;
+        };
+        let Some(diffuse_bind_group) = bind_groups.get("diffuse") else {
             return;
         };
 
@@ -218,9 +188,9 @@ impl PipelineState for Pipeline {
 
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &global_bind_group.bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-        render_pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+        render_pass.set_bind_group(1, &diffuse_bind_group.bind_group, &[]);
+        render_pass.set_bind_group(2, &self.voxels_bind_group.bind_group, &[]);
+        render_pass.draw(0..3, 0..1);
     }
 
     fn get_skip(&self) -> bool {

@@ -86,7 +86,7 @@ impl DepthAttachment {
         bind_groups.insert(
             "depth".to_string(),
             BindGroupState {
-                buffer: None,
+                buffer: vec![],
                 bind_group,
                 bind_group_layout,
             },
