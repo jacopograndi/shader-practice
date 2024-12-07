@@ -28,6 +28,7 @@ mod debug_ui;
 mod rasterize_instanced;
 mod rasterize_simple;
 mod raycast_grid_plain;
+mod raycast_hierarchy_feedback;
 mod raycast_sdf;
 
 use attachments::*;
@@ -371,6 +372,7 @@ impl<'a> RenderState<'a> {
         //push_pipeline::<analytical_sdf_cube::Pipeline>(&mut p);
         //push_pipeline::<rasterize_simple::Pipeline>(&mut p);
         push_pipeline::<raycast_grid_plain::Pipeline>(&mut p);
+        push_pipeline::<raycast_hierarchy_feedback::Pipeline>(&mut p);
         push_pipeline::<rasterize_instanced::Pipeline>(&mut p);
         push_pipeline::<debug_depth::Pipeline>(&mut p);
         push_pipeline::<debug_ui::Pipeline>(&mut p);

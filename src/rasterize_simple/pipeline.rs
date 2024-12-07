@@ -172,7 +172,6 @@ impl PipelineState for Pipeline {
         }
     }
 
-
     fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,

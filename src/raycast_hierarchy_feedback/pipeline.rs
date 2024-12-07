@@ -1,16 +1,35 @@
+use std::sync::{Arc, RwLock};
+
 use glam::IVec3;
 
 use crate::*;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Feedback {
+    requested: [Vec4; 256],
+}
+
+#[derive(Debug, Clone)]
+enum FeedbackReadStatus {
+    Idle,
+    WaitForRead,
+    Mapped,
+}
 
 pub struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     skip: bool,
     //
+    feedback_cpu_buffer: wgpu::Buffer,
+    feedback_gpu_bind_group: BindGroupState,
+    feedback_read_available: Arc<RwLock<FeedbackReadStatus>>,
     voxels_bind_group: BindGroupState,
+    //
     loaded_chunks: HashMap<IVec3, ChunkVersion>,
 }
 
-const PIPELINE_NAME: &str = "Raycast Grid Plain";
+const PIPELINE_NAME: &str = "Raycast Hierarchy Feedback";
 
 impl PipelineState for Pipeline {
     fn get_name(&self) -> String {
@@ -27,6 +46,49 @@ impl PipelineState for Pipeline {
         };
         let Some(diffuse_bind_group) = bind_groups.get("diffuse") else {
             panic!("diffuse bind group missing");
+        };
+
+        let feedback = Feedback {
+            requested: [Vec4::ZERO; 256],
+        };
+        let feedback_gpu_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Feedback GPU Buffer"),
+            contents: bytemuck::cast_slice(&[feedback]),
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+        });
+        let feedback_cpu_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Feedback CPU Buffer"),
+            contents: bytemuck::cast_slice(&[feedback]),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        });
+        let feedback_gpu_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("feedback_gpu_bind_group_layout"),
+            });
+        let feedback_gpu_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &feedback_gpu_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: feedback_gpu_buffer.as_entire_binding(),
+            }],
+            label: Some("feedback_gpu_bind_group"),
+        });
+        let feedback_gpu_bind_group = BindGroupState {
+            buffer: vec![feedback_gpu_buffer],
+            bind_group: feedback_gpu_bind_group,
+            bind_group_layout: feedback_gpu_bind_group_layout,
         };
 
         let voxels_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -62,13 +124,15 @@ impl PipelineState for Pipeline {
             bind_group_layout: voxels_bind_group_layout,
         };
 
-        let shader = device.create_shader_module(wgpu::include_wgsl!("raycast_grid_plain.wgsl"));
+        let shader =
+            device.create_shader_module(wgpu::include_wgsl!("raycast_hierarchy_feedback.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(&(PIPELINE_NAME.to_string() + " Render Pipeline Layout")),
             bind_group_layouts: &[
                 &global_bind_group.bind_group_layout,
                 &diffuse_bind_group.bind_group_layout,
                 &voxels_bind_group.bind_group_layout,
+                &feedback_gpu_bind_group.bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -118,6 +182,9 @@ impl PipelineState for Pipeline {
         Self {
             pipeline,
             skip: false,
+            feedback_cpu_buffer,
+            feedback_gpu_bind_group,
+            feedback_read_available: Arc::new(RwLock::new(FeedbackReadStatus::Idle)),
             voxels_bind_group,
             loaded_chunks: HashMap::new(),
         }
@@ -159,6 +226,44 @@ impl PipelineState for Pipeline {
                 0,
                 bytemuck::cast_slice(chunk_data.as_ref()),
             );
+        }
+
+        let status = self.feedback_read_available.read().unwrap().clone();
+        match status {
+            FeedbackReadStatus::Idle => {
+                *self.feedback_read_available.write().unwrap() = FeedbackReadStatus::WaitForRead;
+                let arc = self.feedback_read_available.clone();
+                let slice = self.feedback_cpu_buffer.slice(..);
+                slice.map_async(wgpu::MapMode::Read, move |result| match result {
+                    Ok(()) => {
+                        *arc.write().unwrap() = FeedbackReadStatus::Mapped;
+                    }
+                    Err(e) => {
+                        println!("error: {:?}", e);
+                        panic!("feedback mapping error");
+                    }
+                });
+            }
+            FeedbackReadStatus::WaitForRead => {}
+            FeedbackReadStatus::Mapped => {
+                let slice = self.feedback_cpu_buffer.slice(..).get_mapped_range();
+                let feed: &Feedback = bytemuck::from_bytes(slice.get(..).unwrap());
+                println!("{:?}, {:?}", feed.requested[0], feed.requested[1]);
+                drop(slice);
+                self.feedback_cpu_buffer.unmap();
+                *self.feedback_read_available.write().unwrap() = FeedbackReadStatus::Idle;
+
+                let feedback = Feedback {
+                    requested: [Vec4::ZERO; 256],
+                };
+
+                // reset the gpu feedback request queue
+                queue.write_buffer(
+                    &self.feedback_gpu_bind_group.buffer[0],
+                    0,
+                    bytemuck::cast_slice(&[feedback]),
+                );
+            }
         }
     }
 
@@ -212,7 +317,23 @@ impl PipelineState for Pipeline {
         render_pass.set_bind_group(0, &global_bind_group.bind_group, &[]);
         render_pass.set_bind_group(1, &diffuse_bind_group.bind_group, &[]);
         render_pass.set_bind_group(2, &self.voxels_bind_group.bind_group, &[]);
+        render_pass.set_bind_group(3, &self.feedback_gpu_bind_group.bind_group, &[]);
         render_pass.draw(0..3, 0..1);
+        drop(render_pass);
+
+        println!("{:?}", self.feedback_read_available);
+        if matches!(
+            *self.feedback_read_available.read().unwrap(),
+            FeedbackReadStatus::Idle
+        ) {
+            encoder.copy_buffer_to_buffer(
+                &self.feedback_gpu_bind_group.buffer[0],
+                0,
+                &self.feedback_cpu_buffer,
+                0,
+                std::mem::size_of::<Feedback>() as u64,
+            );
+        }
     }
 
     fn get_skip(&self) -> bool {

@@ -10,6 +10,17 @@ pub const CHUNK_SIDE: usize = 32;
 pub const CHUNK_AREA: usize = CHUNK_SIDE * CHUNK_SIDE;
 pub const CHUNK_VOLUME: usize = CHUNK_AREA * CHUNK_SIDE;
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ChunkVersion(u64);
+impl ChunkVersion {
+    fn new() -> Self {
+        Self(0)
+    }
+    fn increment(&mut self) {
+        self.0 += 1;
+    }
+}
+
 pub fn simple_universe() -> Universe {
     let mut chunks = HashMap::new();
     {
@@ -52,11 +63,11 @@ impl Universe {
         let (chunk_pos, inner_pos) = self.pos_to_chunk_and_inner(pos);
         if let Some(chunk) = self.chunks.get_mut(&chunk_pos) {
             chunk.set_block(inner_pos, block);
-            chunk.dirty_render = true;
+            chunk.version.increment();
         } else {
             let mut chunk = Chunk::empty();
             chunk.set_block(inner_pos, block);
-            chunk.dirty_render = true;
+            chunk.version.increment();
             self.chunks.insert(chunk_pos, chunk);
         }
     }
@@ -65,7 +76,7 @@ impl Universe {
 #[derive(Debug, Clone)]
 pub struct Chunk {
     _blocks: Arc<RwLock<[Block; CHUNK_VOLUME]>>,
-    pub dirty_render: bool,
+    pub version: ChunkVersion,
 }
 
 impl Chunk {
@@ -84,7 +95,7 @@ impl Chunk {
     pub fn empty() -> Self {
         Self {
             _blocks: Arc::new(RwLock::new([Block::default(); CHUNK_VOLUME])),
-            dirty_render: false,
+            version: ChunkVersion::new(),
         }
     }
 
@@ -92,7 +103,7 @@ impl Chunk {
         let block = Block::from_id(id);
         Self {
             _blocks: Arc::new(RwLock::new([block; CHUNK_VOLUME])),
-            dirty_render: false,
+            version: ChunkVersion::new(),
         }
     }
 

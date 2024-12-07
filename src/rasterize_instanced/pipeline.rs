@@ -1,3 +1,5 @@
+use glam::IVec3;
+
 use crate::*;
 
 // instancing a cube a lot of times
@@ -125,6 +127,8 @@ pub struct Pipeline {
     vertex_buffer: wgpu::Buffer,
     instances: Vec<Instance>,
     instance_buffer: wgpu::Buffer,
+    //
+    loaded_chunks: HashMap<IVec3, ChunkVersion>,
 }
 
 impl PipelineState for Pipeline {
@@ -226,30 +230,46 @@ impl PipelineState for Pipeline {
             vertex_buffer,
             instances,
             instance_buffer,
+            loaded_chunks: HashMap::new(),
         }
     }
 
     fn extract(&mut self, sim_state: &mut SimulationState, queue: &wgpu::Queue) {
-        // todo: it rewrites everything every frame
-        self.instances.clear();
+        let mut reload = false;
         for (world_xyz, chunk) in sim_state.universe.chunks.iter() {
-            let r = chunk.get_ref();
-            for chunk_xyz in Chunk::iter() {
-                let i = Chunk::xyz2idx(chunk_xyz);
-                let id = r[i].id as u32;
-                if id == 0 {
-                    continue;
+            if let Some(loaded_version) = self.loaded_chunks.get_mut(world_xyz) {
+                if chunk.version != *loaded_version {
+                    *loaded_version = chunk.version.clone();
+                    reload = true;
                 }
-                let pos = (world_xyz + chunk_xyz).as_vec3();
-                self.instances.push(Instance { pos, id });
+            } else {
+                self.loaded_chunks
+                    .insert(world_xyz.clone(), chunk.version.clone());
+                reload = true;
             }
         }
 
-        queue.write_buffer(
-            &self.instance_buffer,
-            0,
-            bytemuck::cast_slice(&self.instances),
-        );
+        if reload {
+            self.instances.clear();
+            for (world_xyz, chunk) in sim_state.universe.chunks.iter() {
+                let r = chunk.get_ref();
+                for chunk_xyz in Chunk::iter() {
+                    let i = Chunk::xyz2idx(chunk_xyz);
+                    let id = r[i].id as u32;
+                    if id == 0 {
+                        continue;
+                    }
+                    let pos = (world_xyz + chunk_xyz).as_vec3();
+                    self.instances.push(Instance { pos, id });
+                }
+            }
+
+            queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&self.instances),
+            );
+        }
     }
 
     fn render(
