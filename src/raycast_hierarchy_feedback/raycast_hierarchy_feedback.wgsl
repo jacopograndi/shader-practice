@@ -17,7 +17,9 @@ var diffuse_texture: texture_2d<f32>;
 var diffuse_sampler: sampler;
 
 @group(2) @binding(0)
-var<storage, read> chunk: array<u32>;
+var<storage, read_write> chunks_grid: array<vec4<f32>>;
+@group(2) @binding(1)
+var<storage, read_write> voxels: array<u32>;
 
 @group(3) @binding(0)
 var<storage, read_write> feedback_request: array<vec4<f32>>;
@@ -63,7 +65,7 @@ fn in_chunk_bounds(v: vec3f, offset: vec3f, size: vec3f) -> bool {
 }
 
 fn add_to_request(pos: vec3<f32>) -> bool {
-    for (var i = 0u; i < 256; i++) {
+    for (var i = 0u; i < arrayLength(&feedback_request); i++) {
         let req = feedback_request[i];
         if req.x == pos.x && req.y == pos.y && req.z == pos.z {
             return true;
@@ -132,7 +134,7 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
         }
 
         let idx = u32(map.x) * (32u * 32u) + u32(map.y) * 32u + u32(map.z);
-        voxel_id = chunk[idx];
+        voxel_id = voxels[idx];
         if voxel_id > 0 {
             side = cases.y + 2. * cases.z;
             break;
